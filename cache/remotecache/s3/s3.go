@@ -64,6 +64,7 @@ type Config struct {
 	SessionToken      string
 	UsePathStyle      bool
 	UploadParallelism int
+	StorageClass      s3types.StorageClass
 }
 
 func getConfig(attrs map[string]string) (Config, error) {
@@ -141,6 +142,12 @@ func getConfig(attrs map[string]string) (Config, error) {
 		uploadParallelism = uploadParallelismInt
 	}
 
+	storageClass := s3types.StorageClassStandard
+	storageClassRaw := os.Getenv("AWS_S3_STORAGE_CLASS")
+	if storageClassRaw != "" {
+		storageClass = s3types.StorageClass(storageClassRaw)
+	}
+
 	return Config{
 		Bucket:            bucket,
 		Region:            region,
@@ -155,6 +162,7 @@ func getConfig(attrs map[string]string) (Config, error) {
 		SessionToken:      sessionToken,
 		UsePathStyle:      usePathStyle,
 		UploadParallelism: uploadParallelism,
+		StorageClass:      storageClass,
 	}, nil
 }
 
@@ -399,6 +407,7 @@ type s3Client struct {
 	*manager.Uploader
 	bucket          string
 	prefix          string
+	storageClass    s3types.StorageClass
 	blobsPrefix     string
 	manifestsPrefix string
 }
@@ -426,6 +435,7 @@ func newS3Client(ctx context.Context, config Config) (*s3Client, error) {
 		Uploader:        manager.NewUploader(client),
 		bucket:          config.Bucket,
 		prefix:          config.Prefix,
+		storageClass:    config.StorageClass,
 		blobsPrefix:     config.BlobsPrefix,
 		manifestsPrefix: config.ManifestsPrefix,
 	}, nil
@@ -475,9 +485,10 @@ func (s3Client *s3Client) getReader(ctx context.Context, key string, offset int6
 
 func (s3Client *s3Client) saveMutableAt(ctx context.Context, key string, body io.Reader) error {
 	input := &s3.PutObjectInput{
-		Bucket: &s3Client.bucket,
-		Key:    &key,
-		Body:   body,
+		Bucket:       &s3Client.bucket,
+		Key:          &key,
+		StorageClass: s3Client.storageClass,
+		Body:         body,
 	}
 	_, err := s3Client.Upload(ctx, input)
 	return err
@@ -518,6 +529,7 @@ func (s3Client *s3Client) touch(ctx context.Context, key string, size *int64) (e
 			Bucket:            &s3Client.bucket,
 			CopySource:        &copySource,
 			Key:               &key,
+			StorageClass:      s3Client.storageClass,
 			Metadata:          map[string]string{"updated-at": time.Now().String()},
 			MetadataDirective: "REPLACE",
 		}
@@ -527,8 +539,9 @@ func (s3Client *s3Client) touch(ctx context.Context, key string, size *int64) (e
 		return err
 	}
 	input := &s3.CreateMultipartUploadInput{
-		Bucket: &s3Client.bucket,
-		Key:    &key,
+		Bucket:       &s3Client.bucket,
+		Key:          &key,
+		StorageClass: s3Client.storageClass,
 	}
 
 	output, err := s3Client.CreateMultipartUpload(ctx, input)

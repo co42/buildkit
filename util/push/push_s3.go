@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
@@ -68,7 +69,8 @@ var enabled = false
 type s3ClientHolder struct {
 	*s3.Client
 	*manager.Uploader
-	bucket string
+	bucket       string
+	storageClass types.StorageClass
 }
 
 func init() {
@@ -85,6 +87,11 @@ func init() {
 	if region == "" {
 		region = "us-east-1"
 	}
+	storageClass := types.StorageClassStandard
+	storageClassRaw := os.Getenv("AWS_S3_STORAGE_CLASS")
+	if storageClassRaw != "" {
+		storageClass = types.StorageClass(storageClassRaw)
+	}
 	if key == "" || secret == "" || bucket == "" {
 		panic("missing env values for S3 direct push")
 	}
@@ -98,7 +105,8 @@ func init() {
 			uploader.Concurrency = 50
 			uploader.PartSize = 1024 * 1024 * 20
 		}),
-		bucket: bucket,
+		bucket:       bucket,
+		storageClass: storageClass,
 	}
 }
 
@@ -166,10 +174,11 @@ func (p *S3Pusher) Push(ctx context.Context, descriptor ocispecs.Descriptor) (co
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		upload, err := p.s3Client.Upload(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(p.s3Client.bucket),
-			Key:         aws.String(path),
-			Body:        reader,
-			ContentType: aws.String(descriptor.MediaType),
+			Bucket:       aws.String(p.s3Client.bucket),
+			Key:          aws.String(path),
+			Body:         reader,
+			StorageClass: p.s3Client.storageClass,
+			ContentType:  aws.String(descriptor.MediaType),
 		})
 		if err != nil {
 			errChan <- err
@@ -215,9 +224,10 @@ func (p *S3Pusher) createLink(ctx context.Context, ref string, digest digest.Dig
 
 	// Should we head to check if exist ?
 	_, err = p.s3Client.Upload(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(p.s3Client.bucket),
-		Key:    aws.String(s),
-		Body:   bytes.NewReader([]byte(digest.String())),
+		Bucket:       aws.String(p.s3Client.bucket),
+		Key:          aws.String(s),
+		StorageClass: p.s3Client.storageClass,
+		Body:         bytes.NewReader([]byte(digest.String())),
 	})
 
 	if err == nil {
