@@ -405,6 +405,7 @@ func (r *readerAt) Size() int64 {
 type s3Client struct {
 	*s3.Client
 	*manager.Uploader
+	*manager.Downloader
 	bucket          string
 	prefix          string
 	storageClass    s3types.StorageClass
@@ -431,8 +432,15 @@ func newS3Client(ctx context.Context, config Config) (*s3Client, error) {
 	})
 
 	return &s3Client{
-		Client:          client,
-		Uploader:        manager.NewUploader(client),
+		Client:   client,
+		Uploader: manager.NewUploader(client),
+		Downloader: manager.NewDownloader(client, func(d *manager.Downloader) {
+			d.PartSize = 1024 * 1024 * 5
+			d.Concurrency = 25
+			d.BufferProvider = &BufferProvider{
+				PartSize: d.PartSize,
+			}
+		}),
 		bucket:          config.Bucket,
 		prefix:          config.Prefix,
 		storageClass:    config.StorageClass,
@@ -476,11 +484,17 @@ func (s3Client *s3Client) getReader(ctx context.Context, key string, offset int6
 		input.Range = aws.String(fmt.Sprintf("bytes=%d-", offset))
 	}
 
-	output, err := s3Client.GetObject(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-	return output.Body, nil
+	buff := NewDownloadBuffer()
+
+	go func() {
+		_, err := s3Client.Download(ctx, buff, input)
+		if err != nil {
+			buff.Error(err)
+		}
+		buff.End()
+	}()
+
+	return buff, nil
 }
 
 func (s3Client *s3Client) saveMutableAt(ctx context.Context, key string, body io.Reader) error {
