@@ -242,7 +242,7 @@ func (e *exporter) Finalize(ctx context.Context) (map[string]string, error) {
 					return errors.Wrapf(err, "failed to parse uncompressed annotation")
 				}
 
-				key := e.s3Client.blobKey(dgstPair.Descriptor.Digest)
+				key := e.s3Client.blobKeyNoCache(dgstPair.Descriptor.Digest)
 				exists, size, err := e.s3Client.exists(groupCtx, key)
 				if err != nil {
 					return errors.Wrapf(err, "failed to check file presence in cache")
@@ -621,7 +621,7 @@ func (s3Client *s3Client) touch(ctx context.Context, key string, size *int64) (e
 
 func (s3Client *s3Client) ReaderAt(ctx context.Context, desc ocispecs.Descriptor) (content.ReaderAt, error) {
 	readerAtCloser := toReaderAtCloser(func(offset int64) (io.ReadCloser, error) {
-		return s3Client.getReader(ctx, s3Client.blobKey(desc.Digest), offset)
+		return s3Client.getReader(ctx, s3Client.blobKeyNoCache(desc.Digest), offset)
 	})
 	return &readerAt{ReaderAtCloser: readerAtCloser, size: desc.Size}, nil
 }
@@ -632,6 +632,12 @@ func (s3Client *s3Client) manifestKey(name string) string {
 
 func (s3Client *s3Client) blobKey(dgst digest.Digest) string {
 	return s3Client.prefix + s3Client.blobsPrefix + dgst.String()
+}
+
+func (s3Client *s3Client) blobKeyNoCache(dgst digest.Digest) string {
+	encoded := dgst.Encoded()
+	pre := encoded[:2]
+	return s3Client.prefix + s3Client.blobsPrefix + string(dgst.Algorithm()) + "/" + pre + "/" + encoded + "/data"
 }
 
 func isNotFound(err error) bool {
