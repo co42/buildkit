@@ -169,6 +169,57 @@ curl -s "http://localhost:5050/v2/buildkit/cache/query?parent=" | jq .
 | Minio S3   | 6666 |
 | buildkitd  | 1234 |
 
+## 7. Running E2E Tests
+
+The BuildKit E2E tests for the registryv2 cache feature require Linux (buildkitd only runs on Linux). Run them inside the Lima VM.
+
+### Build and Run Tests
+
+```bash
+cd ~/hf/buildkit
+
+# Build test binary for Linux
+GOOS=linux GOARCH=arm64 go test -c -o registryv2_test.bin ./cache/remotecache/registryv2/
+
+# Copy to Lima VM
+limactl copy registryv2_test.bin default:/tmp/registryv2_test.bin
+
+# Get host IP for registry access
+HOST_IP=$(limactl shell default -- ip route | grep default | awk '{print $3}')
+
+# Run E2E tests (requires sudo for buildkit socket access)
+limactl shell default -- sudo chmod +x /tmp/registryv2_test.bin
+limactl shell default -- sudo REGISTRY_URL=http://${HOST_IP}:5050 /tmp/registryv2_test.bin -test.v -test.run "TestE2E_"
+```
+
+### Test Coverage
+
+The E2E tests cover:
+
+| Test | Description |
+|------|-------------|
+| `TestE2E_BasicCacheExportImport` | Simple Dockerfile with cache export/import cycle |
+| `TestE2E_MultipleRunInstructions` | 4 RUN instructions, verifies all cache hits |
+| `TestE2E_CacheSharingBetweenBuilds` | Shared layers across different Dockerfiles |
+| `TestE2E_MultiStageBuild` | Multi-stage builds with COPY --from |
+| `TestE2E_PackageInstallation` | Real `apk add` caching (slow operation) |
+| `TestE2E_IncrementalChanges` | Only changed layers rebuild, others cached |
+| `TestE2E_ArgAndEnv` | ARG and ENV instruction caching |
+| `TestE2E_CopyWithContext` | COPY from build context |
+| `TestE2E_VerifyCacheAPI` | Direct HTTP API tests |
+| `TestE2E_FullScenario` | Complete CI/CD workflow simulation |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REGISTRY_URL` | `http://localhost:5050` | Registry URL (use host IP from Lima) |
+| `BUILDCTL_ADDR` | `unix:///run/buildkit/buildkitd.sock` | BuildKit daemon address |
+
+### Rate Limiting
+
+Tests automatically skip if Docker Hub rate limiting is encountered (429 Too Many Requests). If this happens, wait or use a different IP.
+
 ## Cleanup
 
 ```bash
