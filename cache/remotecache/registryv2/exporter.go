@@ -145,20 +145,12 @@ func (e *exporter) finalize(ctx context.Context) (map[string]string, error) {
 
 // uploadBlob uploads a blob to the registry and returns its digest.
 func (e *exporter) uploadBlob(ctx context.Context, ra io.ReaderAt, size int64) (digest.Digest, error) {
-	// For now, we use a simplified upload approach
-	// In production, this should use the standard OCI distribution spec upload flow
-
-	// Read the entire blob to compute digest and upload
+	// Read the entire blob
 	data := make([]byte, size)
 	if _, err := ra.ReadAt(data, 0); err != nil && err != io.EOF {
 		return "", errors.Wrap(err, "failed to read blob data")
 	}
 
-	dgst := digest.FromBytes(data)
-
-	// TODO: Implement proper blob upload using OCI distribution spec
-	// For now, the blob is expected to be uploaded separately
-	// The registry should handle blob storage through the standard /v2/<name>/blobs/uploads/ flow
-
-	return dgst, nil
+	// Upload using the OCI distribution API
+	return e.client.UploadBlob(ctx, data)
 }

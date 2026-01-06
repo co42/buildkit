@@ -86,16 +86,92 @@ lima nerdctl exec registry-postgres psql -U registry -c "SELECT name, path FROM 
 lima nerdctl exec registry-postgres psql -U registry -c "SELECT encode(digest, 'hex'), size FROM blobs;"
 ```
 
+## 6. Test BuildKit Cache Export/Import
+
+### Build and Deploy buildkitd
+
+```bash
+cd ~/hf/buildkit
+
+# Build for Linux (Lima VM)
+GOOS=linux GOARCH=arm64 go build -o bin/buildkitd ./cmd/buildkitd
+
+# Copy to Lima and restart
+limactl copy bin/buildkitd default:/tmp/buildkitd
+limactl shell default -- sudo killall -9 buildkitd 2>/dev/null
+limactl shell default -- sudo cp /tmp/buildkitd /usr/local/bin/buildkitd
+limactl shell default -- sudo /usr/local/bin/buildkitd \
+  --addr unix:///run/buildkit/buildkitd.sock \
+  --addr tcp://0.0.0.0:1234 --debug &
+```
+
+### Test Cache Export
+
+```bash
+# Create test Dockerfile
+cat > /tmp/Dockerfile.test << 'EOF'
+FROM alpine:latest
+RUN echo "test layer 1" > /test1.txt
+RUN echo "test layer 2" > /test2.txt
+EOF
+
+# Get host IP accessible from Lima
+HOST_IP=$(limactl shell default -- ip route | grep default | awk '{print $3}')
+
+# Build with cache export
+limactl shell default -- sudo buildctl \
+  --addr unix:///run/buildkit/buildkitd.sock build \
+  --frontend dockerfile.v0 \
+  --local context=/tmp \
+  --local dockerfile=/tmp \
+  --export-cache type=registryv2,registry=http://${HOST_IP}:5050 \
+  --output type=image,name=test:latest,push=false
+```
+
+### Test Cache Import
+
+```bash
+# Clear local cache
+limactl shell default -- sudo buildctl \
+  --addr unix:///run/buildkit/buildkitd.sock prune --all
+
+# Rebuild with cache import
+limactl shell default -- sudo buildctl \
+  --addr unix:///run/buildkit/buildkitd.sock build \
+  --frontend dockerfile.v0 \
+  --local context=/tmp \
+  --local dockerfile=/tmp \
+  --import-cache type=registryv2,registry=http://${HOST_IP}:5050 \
+  --output type=image,name=test:latest,push=false
+```
+
+### Verify Cache Storage
+
+```bash
+# Check cache entries in database
+PGPASSWORD=mysecretpassword psql -h localhost -U registry -d registry \
+  -c "SELECT digest, cache_type, size_bytes FROM buildkit_cache_entries;"
+
+# Check buildkit-cache repository was created
+PGPASSWORD=mysecretpassword psql -h localhost -U registry -d registry \
+  -c "SELECT path FROM repositories WHERE path LIKE '%buildkit%';"
+
+# Query cache API
+curl -s "http://localhost:5050/v2/buildkit/cache/query?parent=" | jq .
+```
+
 ## Ports
 
 | Service    | Port |
 |------------|------|
-| Registry   | 5052 |
+| Registry   | 5050 |
 | PostgreSQL | 5432 |
 | Minio S3   | 6666 |
+| buildkitd  | 1234 |
 
 ## Cleanup
 
 ```bash
 lima nerdctl rm -f registry-postgres minio-s3
+limactl shell default -- sudo killall buildkitd
 ```

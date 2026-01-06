@@ -305,26 +305,120 @@ func (c *Client) SetMount(ctx context.Context, mount *CacheMount) error {
 // This allows the importer to read blob content from the registry.
 func (c *Client) ReaderAt(ctx context.Context, desc ocispecs.Descriptor) (content.ReaderAt, error) {
 	readerAtCloser := toReaderAtCloser(func(offset int64) (io.ReadCloser, error) {
-		return c.getBlobReader(ctx, desc.Digest, offset)
+		return c.GetBlob(ctx, desc.Digest, offset)
 	})
 	return &readerAt{ReaderAtCloser: readerAtCloser, size: desc.Size}, nil
 }
 
-// getBlobReader returns a reader for a blob starting at the given offset.
-func (c *Client) getBlobReader(ctx context.Context, dgst digest.Digest, offset int64) (io.ReadCloser, error) {
-	// The blob is stored in the registry's blob store, accessible via the standard v2 API
-	// We need to get the blob_digest from the cache entry first, then fetch the actual blob
-	entry, err := c.Get(ctx, dgst)
+// cacheRepoName is the repository name used for storing cache blobs.
+// Must be a valid OCI repository name (starts with alphanumeric, can contain .-_).
+const cacheRepoName = "buildkit-cache"
+
+// UploadBlob uploads a blob to the registry using the OCI distribution API.
+// It uses the monolithic upload method (single PUT request).
+// Returns the digest of the uploaded blob.
+func (c *Client) UploadBlob(ctx context.Context, data []byte) (digest.Digest, error) {
+	dgst := digest.FromBytes(data)
+
+	// Check if blob already exists
+	exists, err := c.BlobExists(ctx, dgst)
 	if err != nil {
-		return nil, err
+		return "", errors.Wrap(err, "failed to check blob existence")
 	}
-	if entry == nil {
-		return nil, fmt.Errorf("cache entry not found: %s", dgst)
+	if exists {
+		return dgst, nil
 	}
 
-	// Fetch the actual blob using the blob_digest
-	// The blob is stored in the registry's standard blob store
-	path := fmt.Sprintf("/v2/_buildkit_cache/blobs/%s", entry.BlobDigest.String())
+	// Start upload session: POST /v2/<name>/blobs/uploads/
+	initPath := fmt.Sprintf("/v2/%s/blobs/uploads/", cacheRepoName)
+	initReq, err := c.newRequest(ctx, http.MethodPost, initPath, nil)
+	if err != nil {
+		return "", err
+	}
+	initReq.Header.Set("Content-Type", "application/octet-stream")
+
+	initResp, err := c.httpClient.Do(initReq)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to initiate blob upload")
+	}
+	defer initResp.Body.Close()
+
+	if initResp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(initResp.Body)
+		return "", fmt.Errorf("failed to initiate blob upload: status %d, body: %s", initResp.StatusCode, string(body))
+	}
+
+	// Get the upload URL from Location header
+	location := initResp.Header.Get("Location")
+	if location == "" {
+		return "", errors.New("no Location header in upload response")
+	}
+
+	// Complete the upload with PUT request
+	// If location is relative, make it absolute
+	if !strings.HasPrefix(location, "http") {
+		location = c.baseURL + location
+	}
+
+	// Append digest query parameter
+	if strings.Contains(location, "?") {
+		location += "&digest=" + url.QueryEscape(dgst.String())
+	} else {
+		location += "?digest=" + url.QueryEscape(dgst.String())
+	}
+
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, location, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putReq.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	if c.token != "" {
+		putReq.Header.Set("Authorization", "Bearer "+c.token)
+	} else if c.username != "" && c.password != "" {
+		putReq.SetBasicAuth(c.username, c.password)
+	}
+
+	putResp, err := c.httpClient.Do(putReq)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to upload blob")
+	}
+	defer putResp.Body.Close()
+
+	if putResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(putResp.Body)
+		return "", fmt.Errorf("failed to upload blob: status %d, body: %s", putResp.StatusCode, string(body))
+	}
+
+	return dgst, nil
+}
+
+// BlobExists checks if a blob exists in the registry.
+func (c *Client) BlobExists(ctx context.Context, dgst digest.Digest) (bool, error) {
+	path := fmt.Sprintf("/v2/%s/blobs/%s", cacheRepoName, dgst.String())
+	req, err := c.newRequest(ctx, http.MethodHead, path, nil)
+	if err != nil {
+		return false, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, errors.Wrap(err, "failed to check blob existence")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	return false, fmt.Errorf("unexpected status code checking blob: %d", resp.StatusCode)
+}
+
+// GetBlob retrieves a blob from the registry with optional range support.
+func (c *Client) GetBlob(ctx context.Context, dgst digest.Digest, offset int64) (io.ReadCloser, error) {
+	path := fmt.Sprintf("/v2/%s/blobs/%s", cacheRepoName, dgst.String())
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
@@ -341,7 +435,8 @@ func (c *Client) getBlobReader(ctx context.Context, dgst digest.Digest, offset i
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
-		return nil, fmt.Errorf("failed to get blob: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get blob: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	return resp.Body, nil
