@@ -10,7 +10,7 @@ Currently, BuildKit remote caches (S3, registry) require users to manually speci
 ```
 
 This creates several issues:
-1. **Manual configuration burden** - Users must decide on naming conventions
+1. **Manual configuration burden** - Users must choose the right key
 2. **No automatic sharing** - Different projects with identical build steps don't share cache
 3. **Cache invalidation complexity** - Names must be managed across CI pipelines
 
@@ -319,7 +319,42 @@ cache/remotecache/registryv2/
 +-- exporter.go      # DONE - Cache export logic
 +-- importer.go      # DONE - Cache import logic
 +-- readerat.go      # DONE - ReaderAt helper for blob reading
++-- e2e_test.go      # DONE - Comprehensive E2E tests (10 test cases)
 ```
+
+## E2E Test Suite
+
+Comprehensive end-to-end tests are in `cache/remotecache/registryv2/e2e_test.go`. These tests use real infrastructure (registry + buildkitd) and verify cache behavior across multiple scenarios.
+
+### Running Tests
+
+Tests must run inside Lima VM (buildkitd requires Linux):
+
+```bash
+# Build test binary for Linux
+GOOS=linux GOARCH=arm64 go test -c -o registryv2_test.bin ./cache/remotecache/registryv2/
+
+# Copy and run in Lima
+limactl copy registryv2_test.bin default:/tmp/registryv2_test.bin
+limactl shell default -- sudo REGISTRY_URL=http://192.168.5.2:5050 /tmp/registryv2_test.bin -test.v -test.run "TestE2E_"
+```
+
+### Test Cases
+
+| Test | What It Verifies |
+|------|------------------|
+| `TestE2E_BasicCacheExportImport` | Basic export/import cycle with simple Dockerfile |
+| `TestE2E_MultipleRunInstructions` | 4 RUN instructions all hit cache on rebuild |
+| `TestE2E_CacheSharingBetweenBuilds` | Identical layers shared across different builds |
+| `TestE2E_MultiStageBuild` | Multi-stage builds with COPY --from caching |
+| `TestE2E_PackageInstallation` | Real `apk add curl wget` caching (slow operations) |
+| `TestE2E_IncrementalChanges` | Only changed layers rebuild, stable layers cached |
+| `TestE2E_ArgAndEnv` | ARG and ENV instruction caching |
+| `TestE2E_CopyWithContext` | COPY from build context caching |
+| `TestE2E_VerifyCacheAPI` | Direct HTTP API endpoint tests |
+| `TestE2E_FullScenario` | Complete CI/CD workflow: cold, warm, incremental builds |
+
+See DEV.md for detailed instructions on running tests.
 
 ## Testing the Current Implementation
 
