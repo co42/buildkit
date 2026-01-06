@@ -2,6 +2,7 @@ package registryv2
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -140,7 +141,26 @@ func (e *exporter) finalize(ctx context.Context) (map[string]string, error) {
 		return nil, err
 	}
 
+	// Store the cache config as a manifest in the registry
+	// This enables the importer to reconstruct the full cache chains
+	configDone := progress.OneOff(ctx, "storing cache manifest")
+	if err := e.storeCacheConfig(ctx, cacheConfig); err != nil {
+		return nil, configDone(errors.Wrap(err, "failed to store cache config"))
+	}
+	configDone(nil)
+
 	return nil, nil
+}
+
+// storeCacheConfig stores the cache configuration as a manifest in the registry.
+// The manifest is stored at a well-known tag so it can be retrieved on import.
+func (e *exporter) storeCacheConfig(ctx context.Context, config *cacheimporttypes.CacheConfig) error {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal cache config")
+	}
+
+	return e.client.StoreCacheManifest(ctx, data)
 }
 
 // uploadBlob uploads a blob to the registry and returns its digest.
