@@ -450,3 +450,118 @@ type readerAt struct {
 func (r *readerAt) Size() int64 {
 	return r.size
 }
+
+// cacheManifestTag is the well-known tag used to store the cache manifest.
+const cacheManifestTag = "cache-manifest"
+
+// StoreCacheManifest stores the cache configuration as a manifest in the registry.
+// It uses the OCI manifest format with the cache config as the config blob.
+func (c *Client) StoreCacheManifest(ctx context.Context, configData []byte) error {
+	// First, upload the config data as a blob
+	configDigest, err := c.UploadBlob(ctx, configData)
+	if err != nil {
+		return errors.Wrap(err, "failed to upload cache config blob")
+	}
+
+	// Create an OCI manifest pointing to the config
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
+		"config": map[string]interface{}{
+			"mediaType": "application/vnd.buildkit.cacheconfig.v0",
+			"digest":    configDigest.String(),
+			"size":      len(configData),
+		},
+		"layers": []interface{}{},
+	}
+
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal manifest")
+	}
+
+	// Upload the manifest with the well-known tag
+	path := fmt.Sprintf("/v2/%s/manifests/%s", cacheRepoName, cacheManifestTag)
+	req, err := c.newRequest(ctx, http.MethodPut, path, bytes.NewReader(manifestData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to store cache manifest")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to store cache manifest: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// LoadCacheManifest loads the cache configuration from the registry.
+// Returns nil, nil if the manifest doesn't exist.
+func (c *Client) LoadCacheManifest(ctx context.Context) ([]byte, error) {
+	// First, get the manifest
+	path := fmt.Sprintf("/v2/%s/manifests/%s", cacheRepoName, cacheManifestTag)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load cache manifest")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to load cache manifest: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	manifestData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read manifest")
+	}
+
+	// Parse the manifest to get the config digest
+	var manifest struct {
+		Config struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return nil, errors.Wrap(err, "failed to parse manifest")
+	}
+
+	if manifest.Config.Digest == "" {
+		return nil, errors.New("manifest has no config digest")
+	}
+
+	// Parse and fetch the config blob
+	configDigest, err := digest.Parse(manifest.Config.Digest)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse config digest")
+	}
+
+	reader, err := c.GetBlob(ctx, configDigest, 0)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get config blob")
+	}
+	defer reader.Close()
+
+	configData, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read config blob")
+	}
+
+	return configData, nil
+}
