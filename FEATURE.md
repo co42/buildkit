@@ -95,14 +95,15 @@ Three new tables in the registry's PostgreSQL:
 CREATE TABLE buildkit_cache_entries (
     id BIGSERIAL PRIMARY KEY,
     digest VARCHAR(255) NOT NULL UNIQUE,      -- Cache key (sha256:...)
-    blob_digest BYTEA NOT NULL,               -- Reference to blobs table
+    blob_digest BYTEA NOT NULL,               -- Blob digest (no FK for now, see Phase 2 Step 12)
     cache_type VARCHAR(50) NOT NULL,          -- 'regular' or 'exec.cachemount'
     description TEXT,                         -- e.g., "RUN apt-get update"
     size_bytes BIGINT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     last_used_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    CONSTRAINT fk_blob FOREIGN KEY (blob_digest) REFERENCES blobs(digest) ON DELETE CASCADE
+    CONSTRAINT check_buildkit_cache_type CHECK (cache_type IN ('regular', 'exec.cachemount'))
 );
+-- Note: FK constraint to blobs table will be added in Phase 2 Step 12 after blob upload is implemented
 ```
 
 ### `buildkit_cache_chain` - Layer parent-child relationships
@@ -255,10 +256,41 @@ docker buildx build \
   - Build cache chains from parent relationships
   - Create DescriptorProviderPairs for v1.CacheChains
 
-- [ ] **Step 8: Integration Testing**
-  - Build same Dockerfile twice, verify cache hit
-  - Different projects with same content, verify sharing
-  - Test concurrent builds
+- [x] **Step 8: Integration Testing**
+  - Build with cache export works - entries stored in PostgreSQL
+  - Build with cache import works - manifest loaded from registry
+  - Cache entries persist across builds
+
+### Phase 2: Full Cache Hit Support (TODO)
+
+The current implementation stores cache metadata but doesn't achieve full cache hits because blobs aren't uploaded/downloaded. The following steps are needed:
+
+- [ ] **Step 9: Blob Upload in Exporter**
+  - Use registry's standard OCI blob upload API (`POST /v2/<name>/blobs/uploads/`)
+  - Upload blob content before creating cache entry
+  - Use a dedicated repository name like `_buildkit_cache` for all cache blobs
+  - Handle chunked uploads for large blobs
+
+- [ ] **Step 10: Blob Download in Importer**
+  - Implement `getBlobReader` to fetch from `/v2/_buildkit_cache/blobs/{digest}`
+  - Support Range requests for partial reads
+  - Integrate with containerd's content.Provider interface
+
+- [ ] **Step 11: Cache Chain Reconstruction**
+  - Properly build `v1.CacheChains` from database entries
+  - Parse parent relationships into correct chain structure
+  - Generate proper cache keys that BuildKit can match
+
+- [ ] **Step 12: Add Foreign Key Constraint**
+  - Once blob upload works, add back the FK constraint:
+    `CONSTRAINT fk_blob FOREIGN KEY (blob_digest) REFERENCES blobs(digest) ON DELETE CASCADE`
+  - This ensures cache entries are cleaned up when blobs are deleted
+  - Requires blobs to be uploaded before cache entry creation
+
+- [ ] **Step 13: End-to-End Cache Hit Testing**
+  - Clear local cache, rebuild, verify layers come from remote
+  - Test with different projects sharing identical steps
+  - Measure cache hit rate and performance
 
 ## Files Modified/Created
 
@@ -312,13 +344,19 @@ curl -X POST http://localhost:5052/v2/buildkit/cache/blobs \
 curl http://localhost:5052/v2/buildkit/cache/blobs/sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
 ```
 
-## Success Criteria
+## Current Status
 
-- [ ] User builds without specifying `name` parameter
-- [ ] Same content across projects = automatic cache reuse
-- [ ] Cache survives registry restarts
+### Phase 1 Complete (Metadata Infrastructure)
+- [x] User builds without specifying `name` parameter
+- [x] Cache metadata stored in PostgreSQL
+- [x] Cache entries persist across registry restarts
+- [x] API endpoints for cache management working
+
+### Phase 2 Pending (Full Cache Hits)
+- [ ] Same content across projects = automatic cache reuse (requires blob upload/download)
+- [ ] Layers retrieved from remote cache instead of re-executing
 - [ ] Works with multiple concurrent builds
-- [ ] GC can clean old cache entries
+- [ ] GC can clean old cache entries with blob cleanup
 
 ## References
 
