@@ -261,34 +261,34 @@ docker buildx build \
   - Build with cache import works - manifest loaded from registry
   - Cache entries persist across builds
 
-### Phase 2: Full Cache Hit Support (TODO)
+### Phase 2: Blob Storage Integration
 
-The current implementation stores cache metadata but doesn't achieve full cache hits because blobs aren't uploaded/downloaded. The following steps are needed:
+- [x] **Step 9: Blob Upload in Exporter**
+  - Uses registry's standard OCI blob upload API (`POST /v2/<name>/blobs/uploads/`)
+  - Uploads blob content before creating cache entry
+  - Uses dedicated repository `buildkit-cache` for all cache blobs (auto-created by registry)
+  - Checks blob existence before upload to avoid duplicates
 
-- [ ] **Step 9: Blob Upload in Exporter**
-  - Use registry's standard OCI blob upload API (`POST /v2/<name>/blobs/uploads/`)
-  - Upload blob content before creating cache entry
-  - Use a dedicated repository name like `_buildkit_cache` for all cache blobs
-  - Handle chunked uploads for large blobs
+- [x] **Step 10: Blob Download in Importer**
+  - Implemented `GetBlob` to fetch from `/v2/buildkit-cache/blobs/{digest}`
+  - Supports Range requests for partial reads (offset parameter)
+  - Integrated with containerd's content.Provider interface via `ReaderAt`
 
-- [ ] **Step 10: Blob Download in Importer**
-  - Implement `getBlobReader` to fetch from `/v2/_buildkit_cache/blobs/{digest}`
-  - Support Range requests for partial reads
-  - Integrate with containerd's content.Provider interface
+### Phase 3: Cache Chain Reconstruction (TODO)
 
 - [ ] **Step 11: Cache Chain Reconstruction**
+  - Store parent relationships in `buildkit_cache_chain` table during export
   - Properly build `v1.CacheChains` from database entries
   - Parse parent relationships into correct chain structure
   - Generate proper cache keys that BuildKit can match
 
 - [ ] **Step 12: Add Foreign Key Constraint**
-  - Once blob upload works, add back the FK constraint:
+  - Once cache chain works, add back the FK constraint:
     `CONSTRAINT fk_blob FOREIGN KEY (blob_digest) REFERENCES blobs(digest) ON DELETE CASCADE`
   - This ensures cache entries are cleaned up when blobs are deleted
-  - Requires blobs to be uploaded before cache entry creation
 
 - [ ] **Step 13: End-to-End Cache Hit Testing**
-  - Clear local cache, rebuild, verify layers come from remote
+  - Clear local cache, rebuild, verify RUN layers come from remote cache
   - Test with different projects sharing identical steps
   - Measure cache hit rate and performance
 
@@ -352,9 +352,15 @@ curl http://localhost:5052/v2/buildkit/cache/blobs/sha256:1234567890abcdef123456
 - [x] Cache entries persist across registry restarts
 - [x] API endpoints for cache management working
 
-### Phase 2 Pending (Full Cache Hits)
-- [ ] Same content across projects = automatic cache reuse (requires blob upload/download)
-- [ ] Layers retrieved from remote cache instead of re-executing
+### Phase 2 Complete (Blob Storage Integration)
+- [x] Blobs uploaded to dedicated `buildkit-cache` repository
+- [x] Blobs downloaded during cache import
+- [x] Base layers (e.g., alpine) retrieved from remote cache
+- [x] Registry auto-creates repository on first blob upload
+
+### Phase 3 Pending (Cache Chain Reconstruction)
+- [ ] RUN instruction cache hits (requires parent chain storage)
+- [ ] Same content across projects = automatic cache reuse
 - [ ] Works with multiple concurrent builds
 - [ ] GC can clean old cache entries with blob cleanup
 
