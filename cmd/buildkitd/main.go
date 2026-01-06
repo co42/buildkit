@@ -27,6 +27,7 @@ import (
 	inlineremotecache "github.com/moby/buildkit/cache/remotecache/inline"
 	localremotecache "github.com/moby/buildkit/cache/remotecache/local"
 	registryremotecache "github.com/moby/buildkit/cache/remotecache/registry"
+	registryv2remotecache "github.com/moby/buildkit/cache/remotecache/registryv2"
 	s3remotecache "github.com/moby/buildkit/cache/remotecache/s3"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/cmd/buildkitd/config"
@@ -841,19 +842,21 @@ func newController(ctx context.Context, c *cli.Context, cfg *config.Config) (*co
 	}
 
 	remoteCacheExporterFuncs := map[string]remotecache.ResolveCacheExporterFunc{
-		"registry": registryremotecache.ResolveCacheExporterFunc(sessionManager, resolverFn),
-		"local":    localremotecache.ResolveCacheExporterFunc(sessionManager),
-		"inline":   inlineremotecache.ResolveCacheExporterFunc(),
-		"gha":      gha.ResolveCacheExporterFunc(),
-		"s3":       s3remotecache.ResolveCacheExporterFunc(),
-		"azblob":   azblob.ResolveCacheExporterFunc(),
+		"registry":   registryremotecache.ResolveCacheExporterFunc(sessionManager, resolverFn),
+		"registryv2": registryv2remotecache.ResolveCacheExporterFunc(),
+		"local":      localremotecache.ResolveCacheExporterFunc(sessionManager),
+		"inline":     inlineremotecache.ResolveCacheExporterFunc(),
+		"gha":        gha.ResolveCacheExporterFunc(),
+		"s3":         s3remotecache.ResolveCacheExporterFunc(),
+		"azblob":     azblob.ResolveCacheExporterFunc(),
 	}
 	remoteCacheImporterFuncs := map[string]remotecache.ResolveCacheImporterFunc{
-		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, w.ContentStore(), resolverFn),
-		"local":    localremotecache.ResolveCacheImporterFunc(sessionManager),
-		"gha":      gha.ResolveCacheImporterFunc(),
-		"s3":       s3remotecache.ResolveCacheImporterFunc(),
-		"azblob":   azblob.ResolveCacheImporterFunc(),
+		"registry":   registryremotecache.ResolveCacheImporterFunc(sessionManager, w.ContentStore(), resolverFn),
+		"registryv2": registryv2remotecache.ResolveCacheImporterFunc(),
+		"local":      localremotecache.ResolveCacheImporterFunc(sessionManager),
+		"gha":        gha.ResolveCacheImporterFunc(),
+		"s3":         s3remotecache.ResolveCacheImporterFunc(),
+		"azblob":     azblob.ResolveCacheImporterFunc(),
 	}
 
 	if cfg.CDI.Disabled == nil || !*cfg.CDI.Disabled {

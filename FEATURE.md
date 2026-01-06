@@ -234,23 +234,26 @@ docker buildx build \
 
 ### BuildKit Side (buildkit)
 
-- [ ] **Step 4: Create registryv2 package skeleton**
-  - Create `cache/remotecache/registryv2/` directory
-  - Add `registryv2.go` with backend registration
+- [x] **Step 4: Create registryv2 package skeleton**
+  - Created `cache/remotecache/registryv2/` directory
+  - Added `registryv2.go` with Config, ResolveCacheExporterFunc, ResolveCacheImporterFunc
+  - Added `readerat.go` helper for blob reading
 
-- [ ] **Step 5: Implement client.go**
+- [x] **Step 5: Implement client.go**
   - HTTP client wrapper for registry API
-  - Methods: `CheckCacheExists()`, `GetCacheMetadata()`, `UploadCacheMetadata()`, `QueryByParent()`
+  - Methods: `Exists()`, `Get()`, `Create()`, `Touch()`, `QueryByParent()`, `GetMount()`, `SetMount()`
+  - ReaderAt implementation for blob access
 
-- [ ] **Step 6: Implement exporter.go**
-  - Upload blobs to registry (reuse existing blob upload)
-  - Register cache metadata via API
-  - Build parent-child relationships
+- [x] **Step 6: Implement exporter.go**
+  - Parallel upload with configurable parallelism
+  - Check existing entries before upload
+  - Touch existing entries to update last_used_at
+  - Create cache entries with parent relationships
 
-- [ ] **Step 7: Implement importer.go**
-  - Check cache existence
-  - Walk cache chain by following parent links
-  - Lazy-download blobs when needed
+- [x] **Step 7: Implement importer.go**
+  - Load all cache entries from registry
+  - Build cache chains from parent relationships
+  - Create DescriptorProviderPairs for v1.CacheChains
 
 - [ ] **Step 8: Integration Testing**
   - Build same Dockerfile twice, verify cache hit
@@ -275,13 +278,14 @@ registry/
     +-- buildkit_cache.go            # NEW - HTTP handlers
 ```
 
-### buildkit (TODO)
+### buildkit
 ```
 cache/remotecache/registryv2/
-+-- registryv2.go    # TODO
-+-- client.go        # TODO
-+-- exporter.go      # TODO
-+-- importer.go      # TODO
++-- registryv2.go    # DONE - Main entry point, Config, resolver functions
++-- client.go        # DONE - HTTP client for registry API
++-- exporter.go      # DONE - Cache export logic
++-- importer.go      # DONE - Cache import logic
++-- readerat.go      # DONE - ReaderAt helper for blob reading
 ```
 
 ## Testing the Current Implementation
