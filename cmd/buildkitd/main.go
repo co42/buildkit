@@ -47,6 +47,7 @@ import (
 	"github.com/moby/buildkit/util/appdefaults"
 	"github.com/moby/buildkit/util/archutil"
 	"github.com/moby/buildkit/util/bklog"
+	"github.com/moby/buildkit/util/buildkitmetrics"
 	"github.com/moby/buildkit/util/cachedigest"
 	"github.com/moby/buildkit/util/db/boltutil"
 	"github.com/moby/buildkit/util/disk"
@@ -69,6 +70,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -296,6 +298,8 @@ func main() {
 		if err != nil {
 			return err
 		}
+		otel.SetMeterProvider(mp)
+		buildkitmetrics.Init()
 		closers = append(closers, mp.Shutdown)
 
 		statsHandler := tracing.ServerStatsHandler(

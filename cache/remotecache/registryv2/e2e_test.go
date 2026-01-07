@@ -1,10 +1,13 @@
 package registryv2
 
 import (
+	"bufio"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +41,162 @@ func getBuildctlAddr() string {
 		return addr
 	}
 	return "unix:///run/buildkit/buildkitd.sock"
+}
+
+// getMetricsURL returns the buildkitd metrics endpoint URL.
+func getMetricsURL() string {
+	if url := os.Getenv("BUILDKIT_METRICS_URL"); url != "" {
+		return url
+	}
+	return "http://localhost:6060/metrics"
+}
+
+// getMetricValue queries the Prometheus metrics endpoint and returns the value for a metric.
+// metricName is the base metric name (e.g., "buildkit_cache_requests_total")
+// labels is a map of label names to values to match (e.g., {"result": "hit"})
+// Returns the metric value, or -1 if not found.
+func getMetricValue(t *testing.T, metricName string, labels map[string]string) float64 {
+	t.Helper()
+
+	resp, err := http.Get(getMetricsURL())
+	if err != nil {
+		t.Logf("Failed to fetch metrics: %v", err)
+		return -1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Logf("Metrics endpoint returned status %d", resp.StatusCode)
+		return -1
+	}
+
+	// Parse metric lines - look for lines starting with metricName
+	// Format: metric_name{label1="value1",label2="value2"} value
+	// OTel adds extra labels like otel_scope_name, so we need to check if our
+	// required labels are present anywhere in the label set
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, metricName+"{") && !strings.HasPrefix(line, metricName+" ") {
+			continue
+		}
+
+		// Check if all required labels are present
+		allLabelsMatch := true
+		for k, v := range labels {
+			// Look for label="value" pattern anywhere in the line
+			labelPattern := k + `="` + regexp.QuoteMeta(v) + `"`
+			if !strings.Contains(line, labelPattern) {
+				allLabelsMatch = false
+				break
+			}
+		}
+
+		if !allLabelsMatch {
+			continue
+		}
+
+		// Extract the value at the end of the line
+		valuePattern := regexp.MustCompile(`\}\s+([0-9.e+-]+)$`)
+		matches := valuePattern.FindStringSubmatch(line)
+		if matches != nil {
+			val, err := strconv.ParseFloat(matches[1], 64)
+			if err == nil {
+				return val
+			}
+		}
+	}
+
+	return -1
+}
+
+// getCacheHitCount returns the current cache hit count from metrics.
+func getCacheHitCount(t *testing.T) float64 {
+	return getMetricValue(t, "buildkit_cache_requests_total", map[string]string{"result": "hit"})
+}
+
+// getCacheMissCount returns the current cache miss count from metrics.
+func getCacheMissCount(t *testing.T) float64 {
+	return getMetricValue(t, "buildkit_cache_requests_total", map[string]string{"result": "miss"})
+}
+
+// cacheMetricsSnapshot holds cache metrics at a point in time.
+type cacheMetricsSnapshot struct {
+	hits   float64
+	misses float64
+}
+
+// getCacheMetricsSnapshot returns the current cache metrics.
+func getCacheMetricsSnapshot(t *testing.T) cacheMetricsSnapshot {
+	return cacheMetricsSnapshot{
+		hits:   getCacheHitCount(t),
+		misses: getCacheMissCount(t),
+	}
+}
+
+// verifyCacheHits checks that we got the expected number of cache hits.
+// It verifies both by parsing the build output for "CACHED" strings and by checking metrics.
+// minExpectedHits is the minimum number of cache hits expected.
+func verifyCacheHits(t *testing.T, output string, beforeMetrics cacheMetricsSnapshot, minExpectedHits int) {
+	t.Helper()
+
+	// Check logs for CACHED occurrences
+	cachedCount := strings.Count(strings.ToUpper(output), "CACHED")
+	t.Logf("Cache hits from logs: %d CACHED occurrences", cachedCount)
+
+	// Check metrics
+	afterMetrics := getCacheMetricsSnapshot(t)
+	metricsHits := int(afterMetrics.hits - beforeMetrics.hits)
+	if beforeMetrics.hits < 0 || afterMetrics.hits < 0 {
+		t.Log("Metrics not available, skipping metrics check")
+		// Fall back to log-only check
+		require.GreaterOrEqual(t, cachedCount, minExpectedHits,
+			"Expected at least %d cache hits from logs, got %d", minExpectedHits, cachedCount)
+		return
+	}
+
+	t.Logf("Cache hits from metrics: %d (before: %.0f, after: %.0f)", metricsHits, beforeMetrics.hits, afterMetrics.hits)
+
+	// Both should indicate cache hits
+	require.GreaterOrEqual(t, cachedCount, minExpectedHits,
+		"Expected at least %d cache hits from logs, got %d", minExpectedHits, cachedCount)
+
+	// Metrics should show at least as many hits (may be more due to internal caching)
+	require.GreaterOrEqual(t, metricsHits, minExpectedHits,
+		"Expected at least %d cache hits from metrics, got %d", minExpectedHits, metricsHits)
+
+	t.Logf("Cache verification passed: logs=%d, metrics=%d (expected >= %d)", cachedCount, metricsHits, minExpectedHits)
+}
+
+// verifyCacheHitOrExtract checks cache hits that may show as CACHED or extracting (for remote cache).
+func verifyCacheHitOrExtract(t *testing.T, output string, beforeMetrics cacheMetricsSnapshot, minExpectedHits int) {
+	t.Helper()
+
+	// Check logs for CACHED or extracting occurrences
+	cachedCount := strings.Count(strings.ToUpper(output), "CACHED")
+	extractCount := strings.Count(strings.ToLower(output), "extracting sha256:")
+	totalLogHits := cachedCount + extractCount
+	t.Logf("Cache hits from logs: %d CACHED + %d extracted = %d total", cachedCount, extractCount, totalLogHits)
+
+	// Check metrics
+	afterMetrics := getCacheMetricsSnapshot(t)
+	metricsHits := int(afterMetrics.hits - beforeMetrics.hits)
+	if beforeMetrics.hits < 0 || afterMetrics.hits < 0 {
+		t.Log("Metrics not available, skipping metrics check")
+		require.GreaterOrEqual(t, totalLogHits, minExpectedHits,
+			"Expected at least %d cache hits from logs, got %d", minExpectedHits, totalLogHits)
+		return
+	}
+
+	t.Logf("Cache hits from metrics: %d (before: %.0f, after: %.0f)", metricsHits, beforeMetrics.hits, afterMetrics.hits)
+
+	require.GreaterOrEqual(t, totalLogHits, minExpectedHits,
+		"Expected at least %d cache hits from logs, got %d", minExpectedHits, totalLogHits)
+
+	require.GreaterOrEqual(t, metricsHits, minExpectedHits,
+		"Expected at least %d cache hits from metrics, got %d", minExpectedHits, metricsHits)
+
+	t.Logf("Cache verification passed: logs=%d, metrics=%d (expected >= %d)", totalLogHits, metricsHits, minExpectedHits)
 }
 
 // skipIfNoInfrastructure skips the test if the required infrastructure is not available.
@@ -145,6 +304,9 @@ RUN echo "hello from basic test" > /hello.txt
 	// Prune local cache
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before import build
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	// Rebuild with cache import - should be faster (cache hit)
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
@@ -156,8 +318,8 @@ RUN echo "hello from basic test" > /hello.txt
 	)
 	t.Logf("Import build output:\n%s", output)
 
-	// Check for CACHED in output (indicates cache hit)
-	require.Contains(t, strings.ToUpper(output), "CACHED", "Expected cache hit but got miss")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 1)
 }
 
 // TestE2E_MultipleRunInstructions tests caching with multiple RUN instructions.
@@ -190,6 +352,9 @@ RUN echo "step 4" > /step4.txt
 	// Prune and rebuild
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before import build
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
 		"--frontend", "dockerfile.v0",
@@ -200,10 +365,8 @@ RUN echo "step 4" > /step4.txt
 	)
 	t.Logf("Multi-run import:\n%s", output)
 
-	// Count CACHED occurrences - should have multiple cache hits
-	cachedCount := strings.Count(strings.ToUpper(output), "CACHED")
-	t.Logf("Cache hits: %d", cachedCount)
-	require.GreaterOrEqual(t, cachedCount, 4, "Expected at least 4 cache hits for 4 RUN instructions")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 4)
 }
 
 // TestE2E_CacheSharingBetweenBuilds tests that identical layers are shared across builds.
@@ -240,6 +403,9 @@ RUN echo "unique to build 2" > /unique.txt
 
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before build 2
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	// Build 2 should hit cache for the shared layer
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
@@ -252,10 +418,8 @@ RUN echo "unique to build 2" > /unique.txt
 	)
 	t.Logf("Build 2 output:\n%s", output)
 
-	// The shared layer should be cached - either shows "CACHED" or downloads from cache (extracting)
-	outputUpper := strings.ToUpper(output)
-	cacheHit := strings.Contains(outputUpper, "CACHED") || strings.Contains(output, "extracting sha256:")
-	require.True(t, cacheHit, "Expected shared layer to be cached or extracted from cache")
+	// Verify cache hits via both logs and metrics (shared layer should be cached)
+	verifyCacheHitOrExtract(t, output, beforeMetrics, 1)
 }
 
 // TestE2E_MultiStageBuild tests caching with multi-stage builds.
@@ -289,6 +453,9 @@ RUN echo "runtime setup" > /setup.txt
 	// Prune and rebuild
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before import build
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
 		"--frontend", "dockerfile.v0",
@@ -299,7 +466,8 @@ RUN echo "runtime setup" > /setup.txt
 	)
 	t.Logf("Multi-stage import:\n%s", output)
 
-	require.Contains(t, strings.ToUpper(output), "CACHED", "Expected cache hits in multi-stage build")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 1)
 }
 
 // TestE2E_PackageInstallation tests caching of package installation commands.
@@ -333,6 +501,9 @@ RUN echo "packages installed" > /done.txt
 	// Prune and rebuild
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before cached build
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	// Second build - should be fast (cached)
 	start = time.Now()
 	output = runBuildctlOrSkipOnRateLimit(t,
@@ -346,7 +517,8 @@ RUN echo "packages installed" > /done.txt
 	secondBuildDuration := time.Since(start)
 	t.Logf("Second build (cached): %v\n%s", secondBuildDuration, output)
 
-	require.Contains(t, strings.ToUpper(output), "CACHED", "Expected cache hit for package installation")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 1)
 }
 
 // TestE2E_IncrementalChanges tests that only changed layers are rebuilt.
@@ -386,6 +558,9 @@ RUN echo "layer 3 - version 2" > /layer3.txt
 
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before incremental build
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
 		"--frontend", "dockerfile.v0",
@@ -397,13 +572,8 @@ RUN echo "layer 3 - version 2" > /layer3.txt
 	)
 	t.Logf("Incremental build:\n%s", output)
 
-	// First two layers should be cached, third should be rebuilt
-	// Note: BuildKit may show "CACHED" or download and extract from cache
-	cachedCount := strings.Count(strings.ToUpper(output), "CACHED")
-	extractCount := strings.Count(strings.ToLower(output), "extracting sha256:")
-	t.Logf("Cache hits in incremental build: %d CACHED + %d extracted", cachedCount, extractCount)
-	totalCacheHits := cachedCount + extractCount
-	require.GreaterOrEqual(t, totalCacheHits, 2, "First two stable layers should be cached or extracted")
+	// Verify cache hits via both logs and metrics (first two stable layers should be cached)
+	verifyCacheHitOrExtract(t, output, beforeMetrics, 2)
 }
 
 // TestE2E_ArgAndEnv tests caching with ARG and ENV instructions.
@@ -435,6 +605,9 @@ RUN echo "static content" > /static.txt
 
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before rebuild
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	// Rebuild with same ARG - should hit cache
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
@@ -446,7 +619,8 @@ RUN echo "static content" > /static.txt
 	)
 	t.Logf("ARG rebuild:\n%s", output)
 
-	require.Contains(t, strings.ToUpper(output), "CACHED", "Expected cache hit for same ARG value")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 1)
 }
 
 // TestE2E_CopyWithContext tests caching with COPY from build context.
@@ -483,6 +657,9 @@ RUN echo "processing done" > /done.txt
 
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before rebuild
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	// Rebuild without changes - should hit cache
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
@@ -494,7 +671,8 @@ RUN echo "processing done" > /done.txt
 	)
 	t.Logf("COPY rebuild:\n%s", output)
 
-	require.Contains(t, strings.ToUpper(output), "CACHED", "Expected cache hit when source file unchanged")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 1)
 }
 
 // TestE2E_VerifyCacheAPI tests the registry cache API directly.
@@ -575,6 +753,9 @@ RUN echo "Build complete: $(date)" > /app/build.log
 	t.Log("Step 2: Rebuild after prune (should hit cache)")
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before warm build
+	beforeMetrics := getCacheMetricsSnapshot(t)
+
 	start = time.Now()
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
@@ -587,9 +768,8 @@ RUN echo "Build complete: $(date)" > /app/build.log
 	warmDuration := time.Since(start)
 	t.Logf("Warm build took: %v", warmDuration)
 
-	cachedCount := strings.Count(strings.ToUpper(output), "CACHED")
-	t.Logf("Cache hits: %d", cachedCount)
-	require.GreaterOrEqual(t, cachedCount, 3, "Expected multiple cache hits")
+	// Verify cache hits via both logs and metrics
+	verifyCacheHits(t, output, beforeMetrics, 3)
 
 	// === Third build (incremental change) ===
 	t.Log("Step 3: Incremental change (only last layer changes)")
@@ -616,6 +796,9 @@ RUN echo "Build complete v2: $(date)" > /app/build.log
 
 	pruneBuildkitCache(t)
 
+	// Snapshot metrics before incremental build
+	beforeMetrics = getCacheMetricsSnapshot(t)
+
 	start = time.Now()
 	output = runBuildctlOrSkipOnRateLimit(t,
 		"build",
@@ -629,11 +812,8 @@ RUN echo "Build complete v2: $(date)" > /app/build.log
 	incrementalDuration := time.Since(start)
 	t.Logf("Incremental build took: %v", incrementalDuration)
 
-	cachedCount = strings.Count(strings.ToUpper(output), "CACHED")
-	extractCount := strings.Count(strings.ToLower(output), "extracting sha256:")
-	totalCacheHits := cachedCount + extractCount
-	t.Logf("Cache hits in incremental build: %d CACHED + %d extracted = %d total", cachedCount, extractCount, totalCacheHits)
-	require.GreaterOrEqual(t, totalCacheHits, 3, "First 3 layers should be cached in incremental build")
+	// Verify cache hits via both logs and metrics (first 3 layers should be cached)
+	verifyCacheHitOrExtract(t, output, beforeMetrics, 3)
 
 	// === Summary ===
 	t.Log("=== Summary ===")
