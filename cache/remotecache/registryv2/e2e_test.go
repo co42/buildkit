@@ -12,13 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// End-to-end tests for the registryv2 cache feature.
+// End-to-end tests for the registryv2 cache backend.
 // These tests require the full infrastructure to be running:
 // - GitLab Container Registry with PostgreSQL (on REGISTRY_URL, default http://localhost:5050)
 // - BuildKit daemon accessible via buildctl (BUILDCTL_ADDR or unix:///run/buildkit/buildkitd.sock)
 //
 // To run these tests:
-//   1. Start the infrastructure (see DEV.md)
+//   1. Start the registry and buildkitd
 //   2. Set environment variables if not using defaults:
 //      - REGISTRY_URL=http://localhost:5050
 //      - BUILDCTL_ADDR=unix:///run/buildkit/buildkitd.sock
