@@ -7,6 +7,7 @@ import (
 
 	"github.com/moby/buildkit/solver/internal/pipe"
 	"github.com/moby/buildkit/util/bklog"
+	"github.com/moby/buildkit/util/buildkitmetrics"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
@@ -906,6 +907,8 @@ func (e *edge) computeCacheKeyFromDep(dep *dep, f *pipeFactory) (addedNew bool) 
 // enough state
 func (e *edge) execIfPossible(f *pipeFactory) bool {
 	if len(e.cacheRecords) > 0 {
+		// Cache hit - we have cached results to load
+		buildkitmetrics.RecordCacheHit(context.Background())
 		if e.keysDidChange {
 			e.postpone(f)
 			return true
@@ -917,6 +920,8 @@ func (e *edge) execIfPossible(f *pipeFactory) bool {
 		}
 		return true
 	} else if e.allDepsCompleted {
+		// Cache miss - need to execute the operation
+		buildkitmetrics.RecordCacheMiss(context.Background())
 		if e.keysDidChange {
 			e.postpone(f)
 			return true

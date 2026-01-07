@@ -38,6 +38,7 @@ import (
 	provenancetypes "github.com/moby/buildkit/solver/llbsolver/provenance/types"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/bklog"
+	"github.com/moby/buildkit/util/buildkitmetrics"
 	"github.com/moby/buildkit/util/db"
 	"github.com/moby/buildkit/util/entitlements"
 	"github.com/moby/buildkit/util/imageutil"
@@ -383,6 +384,13 @@ func (c *Controller) Solve(ctx context.Context, req *controlapi.SolveRequest) (*
 	atomic.AddInt64(&c.buildCount, 1)
 	defer atomic.AddInt64(&c.buildCount, -1)
 
+	// Track build duration for metrics
+	startTime := time.Now()
+	buildStatus := "error" // default to error, set to success on successful completion
+	defer func() {
+		buildkitmetrics.RecordBuildDuration(ctx, time.Since(startTime).Seconds(), buildStatus)
+	}()
+
 	if req.Cache == nil {
 		req.Cache = &controlapi.CacheOptions{} // make sure cache options are initialized
 	}
@@ -545,6 +553,7 @@ func (c *Controller) Solve(ctx context.Context, req *controlapi.SolveRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	buildStatus = "success"
 	return &controlapi.SolveResponse{
 		ExporterResponse: resp.ExporterResponse,
 	}, nil
