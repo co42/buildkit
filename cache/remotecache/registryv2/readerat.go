@@ -1,7 +1,10 @@
 package registryv2
 
 import (
+	"context"
 	"io"
+
+	"github.com/moby/buildkit/util/buildkitmetrics"
 )
 
 // ReaderAtCloser combines io.ReaderAt and io.Closer interfaces.
@@ -30,7 +33,11 @@ func (hrs *readerAtCloser) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	if hrs.ra != nil {
-		return hrs.ra.ReadAt(p, off)
+		n, err = hrs.ra.ReadAt(p, off)
+		if n > 0 {
+			buildkitmetrics.RecordCacheTransfer(context.Background(), int64(n), "download", "registryv2")
+		}
+		return n, err
 	}
 
 	if hrs.rc == nil || off != hrs.offset {
@@ -60,6 +67,9 @@ func (hrs *readerAtCloser) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	hrs.offset += int64(n)
+	if n > 0 {
+		buildkitmetrics.RecordCacheTransfer(context.Background(), int64(n), "download", "registryv2")
+	}
 	return
 }
 

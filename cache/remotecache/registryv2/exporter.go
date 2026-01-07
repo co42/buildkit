@@ -9,6 +9,7 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/labels"
 	cacheimporttypes "github.com/moby/buildkit/cache/remotecache/v1/types"
+	"github.com/moby/buildkit/util/buildkitmetrics"
 	"github.com/moby/buildkit/util/progress"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
@@ -172,5 +173,13 @@ func (e *exporter) uploadBlob(ctx context.Context, ra io.ReaderAt, size int64) (
 	}
 
 	// Upload using the OCI distribution API
-	return e.client.UploadBlob(ctx, data)
+	dgst, err := e.client.UploadBlob(ctx, data)
+	if err != nil {
+		return "", err
+	}
+
+	// Record upload bytes for metrics
+	buildkitmetrics.RecordCacheTransfer(ctx, size, "upload", "registryv2")
+
+	return dgst, nil
 }
