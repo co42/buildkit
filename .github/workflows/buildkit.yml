@@ -4,360 +4,53 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
-permissions:
-  contents: read
-
 on:
   schedule:
-    - cron: '0 10 * * *'
+    - cron: "0 10 * * *"
   workflow_dispatch:
   push:
     branches:
-      - 'master'
-      - 'v[0-9]+.[0-9]+'
+      - "master"
+      - "v[0-9]+.[0-9]+"
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
     paths-ignore:
-      - 'README.md'
-      - 'docs/**'
-      - 'frontend/dockerfile/docs/**'
+      - "README.md"
+      - "docs/**"
+      - "frontend/dockerfile/docs/**"
 
 env:
-  GO_VERSION: "1.25"
-  SETUP_BUILDX_VERSION: "edge"
-  SETUP_BUILDKIT_IMAGE: "moby/buildkit:latest"
-  SCOUT_VERSION: "1.13.0"
-  IMAGE_NAME: "moby/buildkit"
+  SETUP_BUILDX_VERSION: "latest"
+  SETUP_BUILDKIT_IMAGE: "registry.internal.huggingface.tech/library/buildkit:latest"
+  IMAGE_NAME: "registry.internal.huggingface.tech/library/buildkit"
+  PLATFORMS: "linux/amd64"
   DESTDIR: "./bin"
 
 jobs:
-  prepare:
-    runs-on: ubuntu-24.04
-    outputs:
-      binaries-platforms: ${{ steps.platforms.outputs.matrix }}
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v6
-      -
-        name: Platforms matrix
-        id: platforms
-        uses: docker/bake-action/subaction/matrix@v6
-        with:
-          target: release
-          fields: platforms
-
-  binaries:
-    runs-on: ubuntu-24.04
-    needs:
-      - prepare
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare.outputs.binaries-platforms) }}
-    steps:
-      -
-        name: Prepare
-        run: |
-          platform=${{ matrix.platforms }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          version: ${{ env.SETUP_BUILDX_VERSION }}
-          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
-          buildkitd-flags: --debug
-      -
-        name: Build
-        uses: docker/bake-action@v6
-        with:
-          # FIXME: remove context once git context with query string implemented in actions-toolkit
-          source: ${{ github.server_url }}/${{ github.repository }}.git#${{ github.ref }}
-          targets: release
-          provenance: mode=max
-          sbom: true
-          set: |
-            *.platform=${{ matrix.platforms }}
-            *.cache-from=type=gha,scope=binaries
-            *.cache-to=type=gha,scope=binaries
-            *.no-cache-filter=${{ startsWith(github.ref, 'refs/tags/v') && 'gobuild-base' || '' }}
-      -
-        name: Rename provenance and sbom
-        working-directory: ${{ env.DESTDIR }}
-        run: |
-          binname=$(find . -name 'buildkit-*')
-          filename=$(basename "$binname" | sed -E 's/\.(tar\.gz|zip)$//')
-          mv "provenance.json" "${filename}.provenance.json"
-          mv "sbom-binaries.spdx.json" "${filename}.sbom.json"
-          find . -name 'sbom*.json' -exec rm {} \;
-      -
-        name: Upload artifacts
-        uses: actions/upload-artifact@v6
-        with:
-          name: buildkit-${{ env.PLATFORM_PAIR }}
-          path: ${{ env.DESTDIR }}/*
-          if-no-files-found: error
-          retention-days: 1
-
-  test:
-    uses: ./.github/workflows/.test.yml
-    secrets: inherit
-    needs:
-      - binaries
-    with:
-      cache_scope: build-integration-tests
-      pkgs: ./client ./cmd/buildctl ./worker/containerd ./solver ./frontend
-      kinds: integration
-      codecov_flags: core
-      includes: |
-        - pkg: ./...
-          skip-integration-tests: 1
-          typ: integration gateway
-        - pkg: ./client
-          worker: containerd
-          tags: nydus
-          typ: integration
-        - pkg: ./client
-          worker: oci
-          tags: nydus
-          typ: integration
-        - pkg: ./...
-          tags: nydus
-          skip-integration-tests: 1
-          typ: integration
-        - pkg: ./cache/remotecache/gha
-          worker: oci
-          typ: integration
-
-  govulncheck:
-    runs-on: ubuntu-24.04
-    permissions:
-      # same as global permission
-      contents: read
-      # required to write sarif report
-      security-events: write
-    steps:
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          version: ${{ env.SETUP_BUILDX_VERSION }}
-          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
-          buildkitd-flags: --debug
-      -
-        name: Run
-        uses: docker/bake-action@v6
-        with:
-          targets: govulncheck
-        env:
-          GOVULNCHECK_FORMAT: sarif
-      -
-        name: Upload SARIF report
-        if: ${{ github.ref == 'refs/heads/master' && github.repository == 'moby/buildkit' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: ${{ env.DESTDIR }}/govulncheck.out
-
   image:
-    runs-on: ubuntu-24.04
-    env:
-      DEFAULT_BASE: alpine
-    needs:
-      - test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          -
-            base: 'alpine'
-          -
-            base: 'alpine'
-            target: 'rootless'
-          -
-            base: 'ubuntu'
-            build-tags: 'nvidia venus'
+    runs-on:
+      group: cpu-high
     steps:
-      -
-        name: Prepare
-        run: |
-          tagSuffix=""
-          if [ -n "${{ matrix.target }}" ]; then
-            tagSuffix="${tagSuffix}-${{ matrix.target }}"
-          fi
-          if [ "${{ matrix.base }}" != "$DEFAULT_BASE" ]; then
-            tagSuffix="${tagSuffix}-${{ matrix.base }}"
-          fi
-          echo "TAG_SUFFIX=${tagSuffix}" >> $GITHUB_ENV
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            if [[ "${GITHUB_REF#refs/tags/}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              tagLatest=""
-              if [ -n "${{ matrix.target }}" ]; then
-                tagLatest=${{ matrix.target }}
-              else
-                tagLatest=latest
-              fi
-              if [ "${{ matrix.base }}" != "$DEFAULT_BASE" ]; then
-                tagLatest="${tagLatest}-${{ matrix.base }}"
-              fi
-              echo "TAG_LATEST=${tagLatest}" >> $GITHUB_ENV
-            fi
-          fi
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Login to Registry
+        uses: docker/login-action@v3
         with:
-          version: ${{ env.SETUP_BUILDX_VERSION }}
-          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
-          buildkitd-flags: --debug
-      -
-        name: Docker meta
-        id: meta
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+          registry: registry.internal.huggingface.tech
+      - name: Extract metadata (tags, labels) for Docker
+        if: ${{ github.event_name == 'pull_request' }}
+        id: meta-pr
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.IMAGE_NAME }}
-          # versioning strategy
-          ## push semver tag v0.24.0
-          ### moby/buildkit:v0.24.0
-          ### moby/buildkit:latest
-          ### moby/buildkit:v0.24.0-rootless
-          ### moby/buildkit:rootless
-          ### moby/buildkit:v0.24.0-ubuntu
-          ### moby/buildkit:latest-ubuntu
-          ## push semver prerelease tag v0.24.0-rc1
-          ### moby/buildkit:v0.24.0-rc1
-          ### moby/buildkit:v0.24.0-rc1-rootless
-          ### moby/buildkit:v0.24.0-rc1-ubuntu
-          ## push on master
-          ### moby/buildkit:master
-          ### moby/buildkit:master-rootless
-          ### moby/buildkit:master-ubuntu
-          ## scheduled event on master
-          ### moby/buildkit:nightly
-          ### moby/buildkit:nightly-rootless
-          ### moby/buildkit:nightly-ubuntu
+            registry.internal.huggingface.tech/library/buildkit
           tags: |
-            type=schedule,pattern=nightly,suffix=${{ env.TAG_SUFFIX }}
-            type=ref,event=branch,suffix=${{ env.TAG_SUFFIX }}
-            type=ref,event=pr,suffix=${{ env.TAG_SUFFIX }}
-            type=semver,pattern={{raw}},suffix=${{ env.TAG_SUFFIX }}
-            type=raw,value=${{ env.TAG_LATEST }}
-          flavor: |
-            latest=false
-          annotations: |
-            org.opencontainers.image.title=BuildKit
-            org.opencontainers.image.vendor=Moby
-          bake-target: meta-helper
-      -
-        name: Login to DockerHub
-        if: ${{ github.repository == 'moby/buildkit' && (github.event_name == 'schedule' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      -
-        name: Build
-        uses: docker/bake-action@v6
-        with:
-          # FIXME: remove context once git context with query string implemented in actions-toolkit
-          source: ${{ github.server_url }}/${{ github.repository }}.git#${{ github.ref }}
-          files: |
-            ./docker-bake.hcl
-            cwd://${{ steps.meta.outputs.bake-file-tags }}
-            cwd://${{ steps.meta.outputs.bake-file-annotations }}
-          targets: image-cross
-          push: ${{ github.repository == 'moby/buildkit' && (github.event_name == 'schedule' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
-          provenance: mode=max,version=v1
-          sbom: true
-          set: |
-            *.cache-from=type=gha,scope=image${{ matrix.target }}-${{ matrix.base }}
-            *.cache-to=type=gha,scope=image${{ matrix.target }}-${{ matrix.base }}
-            *.no-cache-filter=${{ (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && 'buildkit-export-alpine,buildkit-export-ubuntu,gobuild-base,rootless' || '' }}
-        env:
-          IMAGE_TARGET: ${{ matrix.target }}
-          EXPORT_BASE: ${{ matrix.base }}
-          BUILDKITD_TAGS: ${{ matrix.build-tags }}
-
-  scout:
-    runs-on: ubuntu-24.04
-    if: ${{ github.ref == 'refs/heads/master' && github.repository == 'moby/buildkit' }}
-    permissions:
-      # same as global permission
-      contents: read
-      # required to write sarif report
-      security-events: write
-    needs:
-      - image
-    strategy:
-      fail-fast: false
-      matrix:
-        tag:
-          - master
-          - master-rootless
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v6
-      -
-        name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      -
-        name: Scout
-        id: scout
-        uses: crazy-max/.github/.github/actions/docker-scout@ccae1c98f1237b5c19e4ef77ace44fa68b3bc7e4
-        with:
-          version: ${{ env.SCOUT_VERSION }}
-          format: sarif
-          image: registry://${{ env.IMAGE_NAME }}:${{ matrix.tag }}
-      -
-        name: Result output
+            type=raw,value=sha-${{ env.GITHUB_SHA_SHORT }}
+      - name: Build and push Docker image
         run: |
-          jq . ${{ steps.scout.outputs.result-file }}
-      -
-        name: Upload SARIF report
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: ${{ steps.scout.outputs.result-file }}
-
-  release:
-    runs-on: ubuntu-24.04
-    permissions:
-      # required to create GitHub release
-      contents: write
-    needs:
-      - test
-      - binaries
-      - image
-    steps:
-      -
-        name: Download artifacts
-        uses: actions/download-artifact@v7
-        with:
-          path: ${{ env.DESTDIR }}
-          pattern: buildkit-*
-          merge-multiple: true
-      -
-        name: List artifacts
-        run: |
-          tree -nh ${{ env.DESTDIR }}
-      -
-        name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2.5.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          draft: true
-          files: ${{ env.DESTDIR }}/*
+          make images
+          docker tag moby/buildkit:local-rootless registry.internal.huggingface.tech/library/buildkit:latest-rootless
+          docker push registry.internal.huggingface.tech/library/buildkit:latest-rootless
