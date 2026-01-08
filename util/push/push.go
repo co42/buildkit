@@ -25,7 +25,7 @@ import (
 	resolverconfig "github.com/moby/buildkit/util/resolver/config"
 	"github.com/moby/buildkit/util/resolver/limited"
 	"github.com/moby/buildkit/util/resolver/retryhandler"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
@@ -38,11 +38,20 @@ type pusher struct {
 // containerd resolver.Pusher() method is broken and should not be called directly
 // we need to wrap to mask interface detection
 func Pusher(ctx context.Context, resolver remotes.Resolver, ref string) (remotes.Pusher, error) {
-	p, err := resolver.Pusher(ctx, ref)
+	remotePusher, err := resolver.Pusher(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	return &pusher{Pusher: p}, nil
+	if enabled {
+		return &S3Pusher{
+			s3Client:     s3Client,
+			ref:          ref,
+			remotePusher: remotePusher,
+			logger:       bklog.G(ctx).WithField("ref", ref),
+		}, nil
+	} else {
+		return &pusher{Pusher: remotePusher}, nil
+	}
 }
 
 func Push(ctx context.Context, sm *session.Manager, sid string, provider content.Provider, manager content.Manager, dgst digest.Digest, ref string, insecure bool, hosts docker.RegistryHosts, byDigest bool, annotations map[digest.Digest]map[string]string) error {
